@@ -72,7 +72,7 @@ jobs:
           ACTIVE=$(kubectl get svc backend -o jsonpath='{.spec.selector.color}' --ignore-not-found || echo "blue")
           if [[ "$ACTIVE" == "blue" ]]; then INACTIVE=green; else INACTIVE=blue; fi
           echo "Active=$ACTIVE Inactive=$INACTIVE"
-          helm upgrade --install backend-${INACTIVE} helm/backend                 --set color=${INACTIVE}                 --set image.repository=${{ secrets.REGISTRY_USERNAME }}/backend                 --set image.tag=${{ env.VERSION }}                 --namespace ci --create-namespace --wait --timeout 5m
+          helm upgrade --install backend-${INACTIVE} helm/backend                 --set color=${INACTIVE}                 --set image.repository=${{ secrets.DOCKER_USERNAME }}/backend                 --set image.tag=${{ env.VERSION }}                 --namespace ci --create-namespace --wait --timeout 5m
 
       - name: Run smoke tests against inactive
         run: |
