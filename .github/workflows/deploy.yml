@@ -34,7 +34,7 @@ jobs:
       - name: Build image
         id: build
         run: |
-          IMAGE=${{ secrets.REGISTRY_USERNAME }}/${{ env.APP_NAME }}:${{ env.VERSION }}
+          IMAGE=${{ secrets.DOCKER_USERNAME }}/${{ env.APP_NAME }}:${{ env.VERSION }}
           docker build -t $IMAGE .
           echo "::set-output name=image::$IMAGE"
 
