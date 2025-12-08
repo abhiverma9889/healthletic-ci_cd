@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: backend
-        image: username/healthletic:latest   # <-- update with your image
+        image: abhiverma9889/backend   # <-- update with your image
         ports:
         - containerPort: 5000
         readinessProbe:
