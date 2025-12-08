@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
       - name: backend
-        image: abhiverma9889/backend   # <-- update with your image
+        image: abhiverma9889/backend 
         ports:
         - containerPort: 5000
         readinessProbe:
