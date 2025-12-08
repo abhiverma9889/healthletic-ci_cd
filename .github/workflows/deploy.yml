@@ -56,44 +56,70 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-      # Create and configure Kind cluster
+
+       
+
       - name: Create Kind cluster
         uses: helm/kind-action@v1.7.0
+        with:
+          cluster_name: kind
 
-      - name: Configure kubeconfig
+      - name: Configure kubeconfig for Kind
         run: |
-          kind get kubeconfig > ~/.kube/config
+          mkdir -p ~/.kube
+          kind get kubeconfig --name kind > ~/.kube/config
           chmod 600 ~/.kube/config
-          kubectl config use-context kind-kind
+
 
       - name: Verify Kubernetes cluster
         run: |
           kubectl cluster-info
           kubectl get nodes -o wide
 
+      - name: Create namespace
+        run: kubectl create namespace ci || true
+
+      - name: Apply manifests
+        run: kubectl apply -f k8s/ -n ci
+
       - name: Install Helm
         uses: azure/setup-helm@v3
 
       - name: Apply Kubernetes manifests
-        run: kubectl apply -f k8s/
+        run: kubectl apply -f k8s/ -n ci || true
 
       - name: Update deployment image
         run: |
-          backend=${{ secrets.DOCKER_USERNAME }}/${{ env.APP_NAME }}:${{ env.VERSION }}
-
+          kubectl set image deployment/backend \
+            backend=${{ needs.build-and-scan.outputs.image }} -n ci
 
       - name: Verify rollout
-        run: kubectl rollout status deployment/backend
+        run: kubectl rollout status deployment/backend -n ci
 
-      # Blue / Green deployment logic
+      - name: Port Forward Smoke Test
+        run: |
+          kubectl port-forward svc/backend -n ci 8080:5000 &
+          sleep 8
+          curl -f http://localhost:8080/health || exit 1
+
       - name: Determine active/inactive color
         run: |
           ACTIVE=$(kubectl get svc backend -n ci -o jsonpath='{.spec.selector.color}' 2>/dev/null || echo "blue")
           if [[ "$ACTIVE" == "blue" ]]; then INACTIVE=green; else INACTIVE=blue; fi
           echo "ACTIVE=$ACTIVE" >> $GITHUB_ENV
           echo "INACTIVE=$INACTIVE" >> $GITHUB_ENV
-          echo "Active=${ACTIVE} Inactive=${INACTIVE}"
+          echo "Active=$ACTIVE, Inactive=$INACTIVE"
 
-      - name: Deploy to inactive color with Helm
+      - name: Deploy to inactive with Helm
         run: |
-          helm upgrade --install backend-${INACTIVE} h
+          helm upgrade --install backend-${INACTIVE} helm/backend \
+            --set color=${INACTIVE} \
+            --set image.repository=${{ secrets.DOCKER_USERNAME }}/backend \
+            --set image.tag=${{ env.VERSION }} \
+            --namespace ci --create-namespace --wait --timeout 5m
+
+      - name: Promote to active color
+        if: success()
+        run: |
+          kubectl patch svc backend -n ci \
+            -p "{\"spec\":{\"selector\":{\"app\":\"backend\",\"color\":\"${INACTIVE}\"}}}"
