@@ -1,4 +1,4 @@
-name: Advanced CI/CD Pipeline - Healthletic (Kind)
+name: Advanced CI/CD Pipeline - Healthletic (KIND)
 
 on:
   push:
@@ -32,21 +32,21 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - name: Build image
+      - name: Build Docker image
         id: build
         run: |
           IMAGE=${{ secrets.DOCKER_USERNAME }}/${{ env.APP_NAME }}:${{ env.VERSION }}
           docker build -t $IMAGE .
           echo "image=$IMAGE" >> $GITHUB_OUTPUT
 
+      - name: Push Docker image
+        run: docker push ${{ steps.build.outputs.image }}
+
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.build.outputs.image }}
           exit-code: '0'
-
-      - name: Push image
-        run: docker push ${{ steps.build.outputs.image }}
 
   deploy-bluegreen:
     needs: build-and-scan
@@ -56,70 +56,38 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v3
 
-
-       
-
+      # Create KIND cluster
       - name: Create Kind cluster
-        uses: helm/kind-action@v1.7.0
+        uses: helm/kind-action@v1.10.0
         with:
           cluster_name: kind
 
-      - name: Configure kubeconfig for Kind
-        run: |
-          mkdir -p ~/.kube
-          kind get kubeconfig --name kind > ~/.kube/config
-          chmod 600 ~/.kube/config
-
-
+      # Verify cluster
       - name: Verify Kubernetes cluster
         run: |
           kubectl cluster-info
           kubectl get nodes -o wide
 
+      # Create namespace
       - name: Create namespace
         run: kubectl create namespace ci || true
 
-      - name: Apply manifests
+      # Apply manifests
+      - name: Apply Kubernetes manifests
         run: kubectl apply -f k8s/ -n ci
 
-      - name: Install Helm
-        uses: azure/setup-helm@v3
-
-      - name: Apply Kubernetes manifests
-        run: kubectl apply -f k8s/ -n ci || true
-
-      - name: Update deployment image
+      # Update deployment image
+      - name: Update backend image
         run: |
-          kubectl set image deployment/backend \
-            backend=${{ needs.build-and-scan.outputs.image }} -n ci
+          kubectl set image deployment/backend backend=${{ needs.build-and-scan.outputs.image }} -n ci
 
+      # Wait for rollout
       - name: Verify rollout
         run: kubectl rollout status deployment/backend -n ci
 
-      - name: Port Forward Smoke Test
+      # Smoke test
+      - name: Smoke test service
         run: |
           kubectl port-forward svc/backend -n ci 8080:5000 &
-          sleep 8
+          sleep 10
           curl -f http://localhost:8080/health || exit 1
-
-      - name: Determine active/inactive color
-        run: |
-          ACTIVE=$(kubectl get svc backend -n ci -o jsonpath='{.spec.selector.color}' 2>/dev/null || echo "blue")
-          if [[ "$ACTIVE" == "blue" ]]; then INACTIVE=green; else INACTIVE=blue; fi
-          echo "ACTIVE=$ACTIVE" >> $GITHUB_ENV
-          echo "INACTIVE=$INACTIVE" >> $GITHUB_ENV
-          echo "Active=$ACTIVE, Inactive=$INACTIVE"
-
-      - name: Deploy to inactive with Helm
-        run: |
-          helm upgrade --install backend-${INACTIVE} helm/backend \
-            --set color=${INACTIVE} \
-            --set image.repository=${{ secrets.DOCKER_USERNAME }}/backend \
-            --set image.tag=${{ env.VERSION }} \
-            --namespace ci --create-namespace --wait --timeout 5m
-
-      - name: Promote to active color
-        if: success()
-        run: |
-          kubectl patch svc backend -n ci \
-            -p "{\"spec\":{\"selector\":{\"app\":\"backend\",\"color\":\"${INACTIVE}\"}}}"
