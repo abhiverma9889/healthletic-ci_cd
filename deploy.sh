@@ -1,58 +1,41 @@
 #!/bin/bash
-set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-  echo "Usage: ./deploy.sh <environment> <version> <registry>"
-  exit 1
-fi
+# Variables
+DOCKER_USER="abhiverma9889"
+IMAGE_NAME="healthletic"
+TAG="v1"   # change if needed
+NAMESPACE="ci"
 
-ENVIRONMENT=$1
-VERSION=$2
-REGISTRY=$3
-LOG_FILE="deploy.log"
-echo "[$(date -Iseconds)] Starting deployment: env=$ENVIRONMENT version=$VERSION registry=$REGISTRY" | tee -a $LOG_FILE
+echo "🚀 Starting deployment process..."
 
-# Determine active color
-ACTIVE_COLOR=$(kubectl get svc backend -n ${ENVIRONMENT} -o jsonpath='{.spec.selector.color}' 2>/dev/null || echo "blue")
-if [[ "$ACTIVE_COLOR" == "blue" ]]; then
-  INACTIVE_COLOR="green"
-else
-  INACTIVE_COLOR="blue"
-fi
+# 1️⃣ Build Docker image
+echo "📦 Building Docker image..."
+docker build -t $DOCKER_USER/$IMAGE_NAME:$TAG .
 
-echo "Active color: $ACTIVE_COLOR. Deploying new version to: $INACTIVE_COLOR" | tee -a $LOG_FILE
+# 2️⃣ Login to Docker Hub
+echo "🔐 Logging into Docker Hub..."
+docker login || { echo "❌ Docker login failed"; exit 1; }
 
-# Install or upgrade inactive deployment
-helm upgrade --install backend-${INACTIVE_COLOR} helm/backend       --set color=${INACTIVE_COLOR}       --set image.repository=${REGISTRY}/backend       --set image.tag=${VERSION}       --namespace ${ENVIRONMENT} --create-namespace --wait --timeout 5m | tee -a $LOG_FILE
+# 3️⃣ Push image
+echo "📤 Pushing image to Docker Hub..."
+docker push $DOCKER_USER/$IMAGE_NAME:$TAG || { echo "❌ Failed to push image"; exit 1; }
 
-# Run smoke tests against the inactive deployment service (temporary service)
-TEMP_SVC="backend-${INACTIVE_COLOR}-temp"
-kubectl expose deployment backend-${INACTIVE_COLOR} --type=ClusterIP --name=${TEMP_SVC} -n ${ENVIRONMENT} --port=5000 --target-port=5000 --dry-run=client -o yaml | kubectl apply -n ${ENVIRONMENT} -f - | tee -a $LOG_FILE
+# 4️⃣ Update Kubernetes deployment image
+echo "♻ Updating Kubernetes deployment image..."
+kubectl set image deployment/backend backend=$DOCKER_USER/$IMAGE_NAME:$TAG -n $NAMESPACE
+
+# 5️⃣ Apply K8s manifests (optional for 1st deploy)
+echo "🛠 Applying manifest files..."
+kubectl apply -f k8s/ -n $NAMESPACE
+
+# 6️⃣ Wait for rollout
+echo "⏳ Waiting for rollout..."
+kubectl rollout status deployment/backend -n $NAMESPACE
+
+# 7️⃣ Optional: port-forward test
+echo "🔍 Running smoke test..."
+kubectl port-forward svc/backend -n $NAMESPACE 8080:5000 &
 sleep 5
-POD_IP=$(kubectl get svc ${TEMP_SVC} -n ${ENVIRONMENT} -o jsonpath='{.spec.clusterIP}')
-echo "Temporary service IP: $POD_IP" | tee -a $LOG_FILE
+curl -f http://localhost:8080/health || { echo "❌ Health check failed"; exit 1; }
 
-# Smoke test endpoints
-set +e
-curl -sS --fail http://${POD_IP}:5000/health -m 10
-CURL_RC=$?
-set -e
-if [[ $CURL_RC -ne 0 ]]; then
-  echo "Smoke test failed against new deployment. Rolling back." | tee -a $LOG_FILE
-  kubectl delete svc ${TEMP_SVC} -n ${ENVIRONMENT} || true
-  helm rollback backend-${INACTIVE_COLOR} 1 || true
-  exit 1
-fi
-
-# Switch service selector to new color
-echo "Promoting ${INACTIVE_COLOR} to active." | tee -a $LOG_FILE
-kubectl patch svc backend -n ${ENVIRONMENT} -p "{"spec":{"selector":{"app":"backend","color":"${INACTIVE_COLOR}"}}}" || {
-  # If patch fails, create the service
-  kubectl create service clusterip backend --tcp=5000:5000 -n ${ENVIRONMENT}
-  kubectl patch svc backend -n ${ENVIRONMENT} -p "{"spec":{"selector":{"app":"backend","color":"${INACTIVE_COLOR}"}}}"
-}
-
-# Cleanup temp service
-kubectl delete svc ${TEMP_SVC} -n ${ENVIRONMENT} || true
-
-echo "Deployment to ${ENVIRONMENT} successful. Active color is now ${INACTIVE_COLOR}." | tee -a $LOG_FILE
+echo "🎉 Deployment completed successfully!"
