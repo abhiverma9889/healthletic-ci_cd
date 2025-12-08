@@ -9,13 +9,13 @@ on:
 env:
   APP_NAME: backend
   VERSION: v1.${{ github.run_number }}
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}   
 
 jobs:
   build-and-scan:
     runs-on: ubuntu-latest
     outputs:
       image: ${{ steps.build.outputs.image }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -37,14 +37,13 @@ jobs:
         run: |
           IMAGE=${{ secrets.DOCKER_USERNAME }}/${{ env.APP_NAME }}:${{ env.VERSION }}
           docker build -t $IMAGE .
-          echo "::set-output name=image::$IMAGE"
+          echo "image=$IMAGE" >> $GITHUB_OUTPUT
 
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.build.outputs.image }}
           exit-code: '0'
-             
 
       - name: Push image
         run: |
@@ -54,7 +53,8 @@ jobs:
     needs: build-and-scan
     runs-on: ubuntu-latest
     env:
-      KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
+      KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v3
@@ -65,29 +65,31 @@ jobs:
       - name: Install Helm
         uses: azure/setup-helm@v3
 
-      - name: Configure Kubeconfig
+      - name: Configure kubeconfig
         run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBE_CONFIG_DATA }}" | base64 --decode > $HOME/.kube/config
+          mkdir -p ~/.kube
+          echo "${KUBE_CONFIG_DATA}" | base64 --decode > ~/.kube/config
+          kubectl config view
+
+      - name: Test cluster connectivity
+        run: kubectl get nodes
 
       - name: Apply Kubernetes manifests
-        run: |
-          # assumes your YAMLs are in k8s/ folder
-          kubectl apply -f k8s/
+        run: kubectl apply -f k8s/
 
       - name: Update deployment image
         run: |
           kubectl set image deployment/backend \
-            ${{ env.APP_NAME }}=${{ secrets.DOCKER_USERNAME }}/${{ env.APP_NAME }}:${{ env.VERSION }}
+            backend=${{ secrets.DOCKER_USERNAME }}/${{ env.APP_NAME }}:${{ env.VERSION }}
 
       - name: Verify rollout
-        run: kubectl rollout status deployment/${{ env.APP_NAME }}
+        run: kubectl rollout status deployment/backend
 
       - name: Deploy to inactive (blue/green)
         run: |
-          ACTIVE=$(kubectl get svc backend -o jsonpath='{.spec.selector.color}' --ignore-not-found || echo "blue")
+          ACTIVE=$(kubectl get svc backend -n ci -o jsonpath='{.spec.selector.color}' 2>/dev/null || echo "blue")
           if [[ "$ACTIVE" == "blue" ]]; then INACTIVE=green; else INACTIVE=blue; fi
-          echo "Active=$ACTIVE Inactive=$INACTIVE"
+          echo "Active=${ACTIVE} Inactive=${INACTIVE}"
           helm upgrade --install backend-${INACTIVE} helm/backend \
             --set color=${INACTIVE} \
             --set image.repository=${{ secrets.DOCKER_USERNAME }}/backend \
@@ -96,14 +98,17 @@ jobs:
 
       - name: Run smoke tests against inactive
         run: |
-          INACTIVE_SVC=backend-$(kubectl get deploy -n ci -l 'app=backend' -o jsonpath='{.items[0].metadata.labels.color}')
-          kubectl expose deployment backend-${INACTIVE} --type=ClusterIP --name=smoke-temp -n ci --port=5000 --target-port=5000 --dry-run=client -o yaml | kubectl apply -n ci -f -
+          INACTIVE_COLOR=$(kubectl get deploy -n ci -l 'app=backend' -o jsonpath='{.items[0].metadata.labels.color}')
+          SVC_NAME="backend-${INACTIVE_COLOR}"
+          kubectl expose deployment $SVC_NAME --type=ClusterIP --name=smoke-temp -n ci --port=5000 --target-port=5000 --dry-run=client -o yaml | kubectl apply -n ci -f -
           sleep 5
           CLUSTER_IP=$(kubectl get svc smoke-temp -n ci -o jsonpath='{.spec.clusterIP}')
           curl -f http://${CLUSTER_IP}:5000/health -m 10
+          kubectl delete svc smoke-temp -n ci || true
 
       - name: Promote to active
         if: success()
         run: |
           INACTIVE_COLOR=$(kubectl get deploy -n ci -l 'app=backend' -o jsonpath='{.items[0].metadata.labels.color}')
-          kubectl patch svc backend -n ci -p "{\"spec\":{\"selector\":{\"app\":\"backend\",\"color\":\"${INACTIVE_COLOR}\"}}}" || true
+          echo "Promoting color=${INACTIVE_COLOR}"
+          kubectl patch svc backend -n ci -p "{\"spec\":{\"selector\":{\"app\":\"backend\",\"color\":\"${INACTIVE_COLOR}\"}}}"
