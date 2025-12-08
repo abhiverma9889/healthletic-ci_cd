@@ -1,4 +1,4 @@
-name: Advanced CI/CD Pipeline - Healthletic
+name: Advanced CI/CD Pipeline - Healthletic (Kind)
 
 on:
   push:
@@ -52,29 +52,31 @@ jobs:
   deploy-bluegreen:
     needs: build-and-scan
     runs-on: ubuntu-latest
-    env:
-     KUBE_CONFIG_DATA: ${{ secrets.KUBE_CONFIG_DATA }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v3
 
-      - name: Set up kubectl
-        uses: azure/setup-kubectl@v3
+      # Create Kind cluster
+      - name: Create Kind cluster
+        uses: helm/kind-action@v1.7.0
+        with:
+          config: |
+            kind: Cluster
+            apiVersion: kind.x-k8s.io/v1alpha4
+            nodes:
+              - role: control-plane
+              - role: worker
+
+      - name: Verify cluster status
+        run: |
+          kubectl cluster-info
+          kubectl get nodes
 
       - name: Install Helm
         uses: azure/setup-helm@v3
 
-      - name: Configure kubeconfig
-        run: |
-          mkdir -p ~/.kube
-          echo "${KUBE_CONFIG_DATA}" | base64 --decode > ~/.kube/config
-          kubectl config view
-
-      - name: Test cluster connectivity
-        run: kubectl get nodes
-
-      - name: Apply Kubernetes manifests
+      - name: Apply manifests
         run: kubectl apply -f k8s/
 
       - name: Update deployment image
@@ -82,7 +84,7 @@ jobs:
           kubectl set image deployment/backend \
             backend=${{ secrets.DOCKER_USERNAME }}/${{ env.APP_NAME }}:${{ env.VERSION }}
 
-      - name: Verify rollout
+      - name: Rollout status
         run: kubectl rollout status deployment/backend
 
       - name: Deploy to inactive (blue/green)
@@ -107,7 +109,6 @@ jobs:
           kubectl delete svc smoke-temp -n ci || true
 
       - name: Promote to active
-        if: success()
         run: |
           INACTIVE_COLOR=$(kubectl get deploy -n ci -l 'app=backend' -o jsonpath='{.items[0].metadata.labels.color}')
           echo "Promoting color=${INACTIVE_COLOR}"
